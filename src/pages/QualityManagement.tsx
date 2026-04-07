@@ -1,13 +1,29 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { clsx } from 'clsx';
 import {
   ShieldCheck, TrendingDown, TrendingUp, AlertTriangle,
-  Eye, Plus, Star, ArrowDown, ArrowUp, ChevronRight,
-  CheckCircle, Clock
+  Eye, Plus, Star, ChevronRight,
+  CheckCircle, Loader2
 } from 'lucide-react';
-import { materials, qualityFeedbacks as initial, categoryLabels } from '../data/mockData';
-import type { QualityFeedback } from '../types';
+import { materialsApi } from '../api/materials';
+import type { Material } from '../api/materials';
+import { qualityApi } from '../api/quality';
+import type { QualityFeedback } from '../api/quality';
 import { QualityBadge, StatusBadge } from '../components/Badge';
+
+const CATEGORY_LABELS: Record<string, string> = {
+  ic_mcu: '主控芯片',
+  ic_power: '电源管理',
+  ic_driver: '驱动芯片',
+  passive_r: '电阻',
+  passive_c: '电容',
+  passive_l: '电感',
+  connector: '连接器',
+  sensor: '传感器',
+  module: '模组',
+  mechanical: '结构件',
+  other: '其他',
+};
 
 const typeConfig = {
   downgrade: { label: '降级申请', icon: TrendingDown, color: 'text-red-600 bg-red-50 border-red-200' },
@@ -23,66 +39,87 @@ const sourceLabels: Record<string, string> = {
   engineer: '工程师评审',
 };
 
-// Group materials by category for ranking view
-const rankedByCategory = Object.entries(
-  materials.reduce((acc, m) => {
-    if (!acc[m.category]) acc[m.category] = [];
-    acc[m.category].push(m);
-    return acc;
-  }, {} as Record<string, typeof materials>)
-).map(([cat, mats]) => ({
-  category: cat,
-  label: categoryLabels[cat] || cat,
-  materials: mats.sort((a, b) => a.preferredRank - b.preferredRank),
-}));
-
 export default function QualityManagement() {
-  const [feedbacks, setFeedbacks] = useState<QualityFeedback[]>(initial);
+  const [materials, setMaterials] = useState<Material[]>([]);
+  const [feedbacks, setFeedbacks] = useState<QualityFeedback[]>([]);
+  const [loadingMaterials, setLoadingMaterials] = useState(true);
+  const [loadingFeedbacks, setLoadingFeedbacks] = useState(true);
   const [tab, setTab] = useState<'ranking' | 'feedback'>('ranking');
   const [showForm, setShowForm] = useState(false);
   const [selectedFb, setSelectedFb] = useState<QualityFeedback | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     materialId: '',
     type: 'downgrade' as QualityFeedback['type'],
     source: 'test' as QualityFeedback['source'],
     description: '',
-    proposedLevel: 'B' as string,
+    proposedLevel: 'B',
   });
 
-  const handleSubmitFeedback = (e: React.FormEvent) => {
-    e.preventDefault();
-    const mat = materials.find(m => m.id === formData.materialId);
-    if (!mat) return;
-    const newFb: QualityFeedback = {
-      id: `qf${Date.now()}`,
-      materialId: formData.materialId,
-      materialName: mat.name,
-      type: formData.type,
-      source: formData.source,
-      description: formData.description,
-      reportedBy: '张工',
-      reportedAt: new Date().toLocaleString('zh-CN'),
-      status: 'open',
-      previousLevel: mat.qualityLevel,
-      proposedLevel: formData.type !== 'observation' ? formData.proposedLevel as 'A'|'B'|'C'|'D' : undefined,
-    };
-    setFeedbacks(prev => [newFb, ...prev]);
-    setShowForm(false);
-    setFormData({ materialId: '', type: 'downgrade', source: 'test', description: '', proposedLevel: 'B' });
-    setTab('feedback');
+  useEffect(() => {
+    materialsApi.list({ page_size: 500, sort_by: 'preferred_rank' })
+      .then(res => setMaterials(res.data.items))
+      .finally(() => setLoadingMaterials(false));
+    fetchFeedbacks();
+  }, []);
+
+  const fetchFeedbacks = () => {
+    setLoadingFeedbacks(true);
+    qualityApi.list()
+      .then(res => setFeedbacks(res.data))
+      .finally(() => setLoadingFeedbacks(false));
   };
 
-  const handleProcess = (id: string, status: 'processing' | 'resolved') => {
-    setFeedbacks(prev => prev.map(f => f.id === id ? { ...f, status } : f));
-    if (selectedFb?.id === id) setSelectedFb(prev => prev ? { ...prev, status } : null);
+  const handleSubmitFeedback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await qualityApi.create({
+        material_id: formData.materialId,
+        type: formData.type,
+        source: formData.source,
+        description: formData.description,
+        proposed_level: formData.type !== 'observation' ? formData.proposedLevel : undefined,
+      });
+      setShowForm(false);
+      setFormData({ materialId: '', type: 'downgrade', source: 'test', description: '', proposedLevel: 'B' });
+      setTab('feedback');
+      fetchFeedbacks();
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  const handleProcess = async (id: string, status: 'processing' | 'resolved') => {
+    try {
+      const res = await qualityApi.updateStatus(id, status);
+      const updated = res.data;
+      setFeedbacks(prev => prev.map(f => f.id === id ? updated : f));
+      if (selectedFb?.id === id) setSelectedFb(updated);
+    } catch {}
+  };
+
+  // Group materials by category for ranking
+  const rankedByCategory = Object.entries(
+    materials.reduce((acc, m) => {
+      if (!acc[m.category]) acc[m.category] = [];
+      acc[m.category].push(m);
+      return acc;
+    }, {} as Record<string, Material[]>)
+  ).map(([cat, mats]) => ({
+    category: cat,
+    label: CATEGORY_LABELS[cat] || cat,
+    materials: mats.sort((a, b) => a.preferred_rank - b.preferred_rank),
+  }));
 
   const qualityCounts = {
-    A: materials.filter(m => m.qualityLevel === 'A').length,
-    B: materials.filter(m => m.qualityLevel === 'B').length,
-    C: materials.filter(m => m.qualityLevel === 'C').length,
-    D: materials.filter(m => m.qualityLevel === 'D').length,
+    A: materials.filter(m => m.quality_level === 'A').length,
+    B: materials.filter(m => m.quality_level === 'B').length,
+    C: materials.filter(m => m.quality_level === 'C').length,
+    D: materials.filter(m => m.quality_level === 'D').length,
   };
+
+  const openFeedbacks = feedbacks.filter(f => f.status !== 'resolved').length;
 
   return (
     <div className="space-y-5">
@@ -119,7 +156,7 @@ export default function QualityManagement() {
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
         {([
           { key: 'ranking', label: '优选排名' },
-          { key: 'feedback', label: `质量反馈 (${feedbacks.filter(f => f.status !== 'resolved').length})` },
+          { key: 'feedback', label: `质量反馈 (${openFeedbacks})` },
         ] as const).map(t => (
           <button
             key={t.key}
@@ -136,136 +173,144 @@ export default function QualityManagement() {
 
       {/* Ranking Tab */}
       {tab === 'ranking' && (
-        <div className="space-y-4">
-          {rankedByCategory.map(({ category, label, materials: mats }) => (
-            <div key={category} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-              <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-700">{label}</h3>
-                <span className="text-xs text-gray-400">{mats.length} 种物料</span>
-              </div>
-              <div className="divide-y divide-gray-100">
-                {mats.map((m, idx) => (
-                  <div key={m.id} className={clsx(
-                    'flex items-center gap-4 px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors',
-                    m.status === 'deprecated' && 'opacity-50'
-                  )}>
-                    {/* Rank indicator */}
-                    <div className="flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0"
-                      style={{
-                        backgroundColor: idx === 0 ? '#fef3c7' : idx === 1 ? '#f1f5f9' : '#f9fafb',
-                        border: idx === 0 ? '1px solid #fbbf24' : '1px solid #e2e8f0'
-                      }}
-                    >
-                      {idx === 0 ? (
-                        <Star size={13} className="text-yellow-500 fill-yellow-400" />
-                      ) : (
-                        <span className="text-xs font-bold text-gray-400">#{m.preferredRank}</span>
-                      )}
-                    </div>
+        loadingMaterials ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 size={24} className="animate-spin text-gray-400" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {rankedByCategory.map(({ category, label, materials: mats }) => (
+              <div key={category} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-gray-700">{label}</h3>
+                  <span className="text-xs text-gray-400">{mats.length} 种物料</span>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {mats.map((m, idx) => (
+                    <div key={m.id} className={clsx(
+                      'flex items-center gap-4 px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors',
+                      m.status === 'deprecated' && 'opacity-50'
+                    )}>
+                      <div className="flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0"
+                        style={{
+                          backgroundColor: idx === 0 ? '#fef3c7' : idx === 1 ? '#f1f5f9' : '#f9fafb',
+                          border: idx === 0 ? '1px solid #fbbf24' : '1px solid #e2e8f0'
+                        }}
+                      >
+                        {idx === 0 ? (
+                          <Star size={13} className="text-yellow-500 fill-yellow-400" />
+                        ) : (
+                          <span className="text-xs font-bold text-gray-400">#{m.preferred_rank}</span>
+                        )}
+                      </div>
 
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-900">{m.name}</span>
-                        {idx === 0 && <span className="text-[11px] text-yellow-600 bg-yellow-50 border border-yellow-200 px-1.5 py-0.5 rounded">首选推荐</span>}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-gray-900">{m.name}</span>
+                          {idx === 0 && <span className="text-[11px] text-yellow-600 bg-yellow-50 border border-yellow-200 px-1.5 py-0.5 rounded">首选推荐</span>}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-0.5">
+                          {m.manufacturer} {m.manufacturer_pn} · <span className="font-mono">{m.part_number}</span>
+                        </div>
                       </div>
-                      <div className="text-xs text-gray-400 mt-0.5">
-                        {m.manufacturer} {m.manufacturerPN} · <span className="font-mono">{m.partNumber}</span>
-                      </div>
-                    </div>
 
-                    <div className="flex items-center gap-3">
-                      <QualityBadge level={m.qualityLevel} />
-                      <StatusBadge status={m.status} />
-                      {m.leadTime && (
-                        <span className="text-xs text-gray-400">货期 {m.leadTime}天</span>
-                      )}
-                      {m.unitPrice != null && (
-                        <span className="text-xs font-medium text-gray-600">¥{m.unitPrice}</span>
-                      )}
-                      <div className="flex gap-1">
-                        <button className="p-1 hover:bg-gray-100 rounded cursor-pointer" title="上移">
-                          <ArrowUp size={13} className="text-gray-400" />
-                        </button>
-                        <button className="p-1 hover:bg-gray-100 rounded cursor-pointer" title="下移">
-                          <ArrowDown size={13} className="text-gray-400" />
-                        </button>
+                      <div className="flex items-center gap-3">
+                        <QualityBadge level={m.quality_level} />
+                        <StatusBadge status={m.status} />
+                        {m.lead_time_days && (
+                          <span className="text-xs text-gray-400">货期 {m.lead_time_days}天</span>
+                        )}
+                        {m.unit_price != null && (
+                          <span className="text-xs font-medium text-gray-600">¥{m.unit_price}</span>
+                        )}
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )
       )}
 
       {/* Feedback Tab */}
       {tab === 'feedback' && (
         <div className="flex gap-5">
           <div className="flex-1 min-w-0 space-y-3">
-            {feedbacks.map(fb => {
-              const cfg = typeConfig[fb.type];
-              const Icon = cfg.icon;
-              return (
-                <div
-                  key={fb.id}
-                  onClick={() => setSelectedFb(fb)}
-                  className={clsx(
-                    'bg-white rounded-xl border p-4 cursor-pointer hover:shadow-sm transition-all',
-                    selectedFb?.id === fb.id ? 'border-[#F97316] ring-1 ring-[#F97316]/20' : 'border-gray-200'
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 border ${cfg.color}`}>
-                      <Icon size={15} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-medium text-gray-900">{fb.materialName}</span>
-                        <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${cfg.color}`}>
-                          {cfg.label}
-                        </span>
-                        <StatusBadge status={fb.status} />
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1 line-clamp-2">{fb.description}</p>
-                      <div className="flex items-center gap-3 mt-2 text-xs text-gray-400 flex-wrap">
-                        <span>{sourceLabels[fb.source]}</span>
-                        <span>·</span>
-                        <span>{fb.reportedBy}</span>
-                        <span>·</span>
-                        <span>{fb.reportedAt}</span>
-                        {fb.proposedLevel && (
-                          <>
-                            <span>·</span>
-                            <span className="flex items-center gap-1">
-                              <QualityBadge level={fb.previousLevel} />
-                              <ChevronRight size={11} />
-                              <QualityBadge level={fb.proposedLevel} />
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {fb.status === 'open' && (
-                      <button
-                        onClick={e => { e.stopPropagation(); handleProcess(fb.id, 'processing'); }}
-                        className="text-[11px] bg-blue-100 text-blue-700 hover:bg-blue-200 px-2 py-1 rounded transition-colors cursor-pointer flex-shrink-0"
-                      >
-                        开始处理
-                      </button>
+            {loadingFeedbacks ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 size={24} className="animate-spin text-gray-400" />
+              </div>
+            ) : feedbacks.length === 0 ? (
+              <div className="bg-white rounded-xl border border-gray-200 py-16 text-center">
+                <ShieldCheck size={32} className="mx-auto text-gray-300 mb-3" />
+                <p className="text-sm text-gray-400">暂无质量反馈</p>
+              </div>
+            ) : (
+              feedbacks.map(fb => {
+                const cfg = typeConfig[fb.type];
+                const Icon = cfg.icon;
+                return (
+                  <div
+                    key={fb.id}
+                    onClick={() => setSelectedFb(fb)}
+                    className={clsx(
+                      'bg-white rounded-xl border p-4 cursor-pointer hover:shadow-sm transition-all',
+                      selectedFb?.id === fb.id ? 'border-[#F97316] ring-1 ring-[#F97316]/20' : 'border-gray-200'
                     )}
-                    {fb.status === 'processing' && (
-                      <button
-                        onClick={e => { e.stopPropagation(); handleProcess(fb.id, 'resolved'); }}
-                        className="text-[11px] bg-green-100 text-green-700 hover:bg-green-200 px-2 py-1 rounded transition-colors cursor-pointer flex-shrink-0"
-                      >
-                        标记解决
-                      </button>
-                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 border ${cfg.color}`}>
+                        <Icon size={15} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium text-gray-900">{fb.material_name}</span>
+                          <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${cfg.color}`}>
+                            {cfg.label}
+                          </span>
+                          <StatusBadge status={fb.status} />
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1 line-clamp-2">{fb.description}</p>
+                        <div className="flex items-center gap-3 mt-2 text-xs text-gray-400 flex-wrap">
+                          <span>{sourceLabels[fb.source]}</span>
+                          <span>·</span>
+                          <span>{fb.reporter_name}</span>
+                          <span>·</span>
+                          <span>{new Date(fb.reported_at).toLocaleDateString('zh-CN')}</span>
+                          {fb.proposed_level && (
+                            <>
+                              <span>·</span>
+                              <span className="flex items-center gap-1">
+                                <QualityBadge level={fb.previous_level} />
+                                <ChevronRight size={11} />
+                                <QualityBadge level={fb.proposed_level} />
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {fb.status === 'open' && (
+                        <button
+                          onClick={e => { e.stopPropagation(); handleProcess(fb.id, 'processing'); }}
+                          className="text-[11px] bg-blue-100 text-blue-700 hover:bg-blue-200 px-2 py-1 rounded transition-colors cursor-pointer flex-shrink-0"
+                        >
+                          开始处理
+                        </button>
+                      )}
+                      {fb.status === 'processing' && (
+                        <button
+                          onClick={e => { e.stopPropagation(); handleProcess(fb.id, 'resolved'); }}
+                          className="text-[11px] bg-green-100 text-green-700 hover:bg-green-200 px-2 py-1 rounded transition-colors cursor-pointer flex-shrink-0"
+                        >
+                          标记解决
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
 
           {/* Detail */}
@@ -277,13 +322,13 @@ export default function QualityManagement() {
               </div>
               <div className="space-y-2 text-xs">
                 {[
-                  { label: '物料', value: selectedFb.materialName },
+                  { label: '物料', value: selectedFb.material_name },
                   { label: '反馈类型', value: typeConfig[selectedFb.type].label },
                   { label: '来源', value: sourceLabels[selectedFb.source] },
-                  { label: '提交人', value: selectedFb.reportedBy },
-                  { label: '提交时间', value: selectedFb.reportedAt },
-                  { label: '当前等级', value: <QualityBadge level={selectedFb.previousLevel} /> },
-                  ...(selectedFb.proposedLevel ? [{ label: '建议等级', value: <QualityBadge level={selectedFb.proposedLevel} /> }] : []),
+                  { label: '提交人', value: selectedFb.reporter_name },
+                  { label: '提交时间', value: new Date(selectedFb.reported_at).toLocaleString('zh-CN') },
+                  { label: '当前等级', value: <QualityBadge level={selectedFb.previous_level} /> },
+                  ...(selectedFb.proposed_level ? [{ label: '建议等级', value: <QualityBadge level={selectedFb.proposed_level} /> }] : []),
                 ].map(row => (
                   <div key={row.label} className="flex justify-between items-center gap-2">
                     <span className="text-gray-400">{row.label}</span>
@@ -331,7 +376,7 @@ export default function QualityManagement() {
                 >
                   <option value="">请选择物料</option>
                   {materials.map(m => (
-                    <option key={m.id} value={m.id}>{m.name} ({m.partNumber})</option>
+                    <option key={m.id} value={m.id}>{m.name} ({m.part_number})</option>
                   ))}
                 </select>
               </div>
@@ -391,7 +436,8 @@ export default function QualityManagement() {
                 <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 cursor-pointer">
                   取消
                 </button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[#F97316] text-white rounded-lg hover:bg-orange-600 cursor-pointer font-medium">
+                <button type="submit" disabled={submitting} className="px-4 py-2 text-sm bg-[#F97316] text-white rounded-lg hover:bg-orange-600 cursor-pointer font-medium disabled:opacity-60 flex items-center gap-2">
+                  {submitting && <Loader2 size={13} className="animate-spin" />}
                   提交反馈
                 </button>
               </div>

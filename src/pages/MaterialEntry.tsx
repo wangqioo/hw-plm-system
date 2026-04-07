@@ -1,37 +1,27 @@
 import { useState } from 'react';
 import {
   Upload, Sparkles, FileText, CheckCircle, AlertCircle,
-  ChevronDown, ChevronUp, Plus, Trash2, Loader2, RotateCcw
+  Plus, Trash2, Loader2, RotateCcw
 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { categoryLabels } from '../data/mockData';
-import type { MaterialCategory } from '../types';
+import { uploadApi } from '../api/upload';
+import { materialsApi } from '../api/materials';
+
+const CATEGORY_LABELS: Record<string, string> = {
+  ic_mcu: '主控芯片',
+  ic_power: '电源管理',
+  ic_driver: '驱动芯片',
+  passive_r: '电阻',
+  passive_c: '电容',
+  passive_l: '电感',
+  connector: '连接器',
+  sensor: '传感器',
+  module: '模组',
+  mechanical: '结构件',
+  other: '其他',
+};
 
 type AiState = 'idle' | 'extracting' | 'done' | 'error';
-
-const DEMO_EXTRACTED = {
-  name: 'STM32G431CBU6 微控制器',
-  category: 'ic_mcu' as MaterialCategory,
-  manufacturer: 'ST',
-  manufacturerPN: 'STM32G431CBU6',
-  description: 'ARM Cortex-M4, 170MHz, 128KB Flash, 32KB RAM, UFQFPN-48',
-  parameters: [
-    { key: '内核', value: 'ARM Cortex-M4' },
-    { key: '主频', value: '170MHz' },
-    { key: 'Flash', value: '128KB' },
-    { key: 'RAM', value: '32KB' },
-    { key: '封装', value: 'UFQFPN-48' },
-    { key: '工作电压', value: '1.71~3.6V' },
-    { key: '工作温度', value: '-40~+85°C' },
-    { key: 'ADC', value: '12-bit, 4通道' },
-    { key: 'DAC', value: '12-bit, 3通道' },
-    { key: 'UART', value: '3路' },
-    { key: 'SPI', value: '3路' },
-    { key: 'I2C', value: '2路' },
-    { key: 'CAN', value: 'FDCAN x1' },
-    { key: 'USB', value: 'USB 2.0 FS' },
-  ],
-};
 
 interface Param { key: string; value: string }
 
@@ -39,13 +29,17 @@ export default function MaterialEntry() {
   const [aiState, setAiState] = useState<AiState>('idle');
   const [dragOver, setDragOver] = useState(false);
   const [fileName, setFileName] = useState('');
+  const [extractedCount, setExtractedCount] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [datasheetUrl, setDatasheetUrl] = useState('');
   const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
-  // Form state
   const [form, setForm] = useState({
     name: '',
     partNumber: '',
-    category: '' as MaterialCategory | '',
+    category: '',
     manufacturer: '',
     manufacturerPN: '',
     description: '',
@@ -58,29 +52,36 @@ export default function MaterialEntry() {
   const [params, setParams] = useState<Param[]>([{ key: '', value: '' }]);
   const [submitted, setSubmitted] = useState(false);
 
+  const handleFile = async (file: File) => {
+    setFileName(file.name);
+    setAiState('extracting');
+    setUploadProgress(0);
+    try {
+      const res = await uploadApi.uploadPDF(file, pct => setUploadProgress(pct));
+      const d = res.data;
+      setForm(f => ({
+        ...f,
+        name: d.suggested_name || f.name,
+        category: d.suggested_category || f.category,
+        manufacturer: d.suggested_manufacturer || f.manufacturer,
+        manufacturerPN: d.suggested_manufacturer_pn || f.manufacturerPN,
+        description: d.suggested_description || f.description,
+      }));
+      setParams(d.parameters.length > 0 ? d.parameters : [{ key: '', value: '' }]);
+      setExtractedCount(d.parameters.length);
+      setDatasheetUrl(d.file_url || '');
+      setAiState('done');
+      setStep(2);
+    } catch {
+      setAiState('error');
+    }
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files[0];
-    if (file) { setFileName(file.name); triggerExtract(); }
-  };
-
-  const triggerExtract = () => {
-    setAiState('extracting');
-    setTimeout(() => {
-      const d = DEMO_EXTRACTED;
-      setForm(f => ({
-        ...f,
-        name: d.name,
-        category: d.category,
-        manufacturer: d.manufacturer,
-        manufacturerPN: d.manufacturerPN,
-        description: d.description,
-      }));
-      setParams(d.parameters);
-      setAiState('done');
-      setStep(2);
-    }, 2800);
+    if (file) handleFile(file);
   };
 
   const addParam = () => setParams(p => [...p, { key: '', value: '' }]);
@@ -88,24 +89,49 @@ export default function MaterialEntry() {
   const updateParam = (i: number, field: 'key' | 'value', val: string) =>
     setParams(p => p.map((item, idx) => idx === i ? { ...item, [field]: val } : item));
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setStep(3);
-    setSubmitted(true);
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      await materialsApi.create({
+        part_number: form.partNumber || `M${Date.now()}`,
+        name: form.name,
+        category: form.category,
+        manufacturer: form.manufacturer,
+        manufacturer_pn: form.manufacturerPN,
+        description: form.description || undefined,
+        quality_level: form.qualityLevel,
+        preferred_rank: parseInt(form.preferredRank) || 2,
+        unit_price: form.unitPrice ? parseFloat(form.unitPrice) : undefined,
+        lead_time_days: form.leadTime ? parseInt(form.leadTime) : undefined,
+        notes: form.notes || undefined,
+        parameters: params.filter(p => p.key.trim()),
+      });
+      setStep(3);
+      setSubmitted(true);
+    } catch (err: any) {
+      setSubmitError(err.response?.data?.detail || '提交失败，请检查填写内容');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const reset = () => {
     setAiState('idle');
     setFileName('');
+    setExtractedCount(0);
+    setUploadProgress(0);
+    setDatasheetUrl('');
     setStep(1);
     setSubmitted(false);
+    setSubmitError('');
     setForm({ name: '', partNumber: '', category: '', manufacturer: '', manufacturerPN: '', description: '', qualityLevel: 'B', preferredRank: '2', unitPrice: '', leadTime: '', notes: '' });
     setParams([{ key: '', value: '' }]);
   };
 
   return (
     <div className="max-w-4xl mx-auto space-y-5">
-      {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-gray-900">物料录入</h1>
         <p className="text-sm text-gray-500 mt-0.5">上传数据手册，AI自动提取核心参数，工程师人工审核确认</p>
@@ -150,9 +176,12 @@ export default function MaterialEntry() {
               <RotateCcw size={14} />
               继续录入
             </button>
-            <button className="flex items-center gap-2 bg-[#F97316] text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600 cursor-pointer transition-colors">
+            <a
+              href="/approvals"
+              className="flex items-center gap-2 bg-[#F97316] text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600 cursor-pointer transition-colors"
+            >
               查看审核进度
-            </button>
+            </a>
           </div>
         </div>
       )}
@@ -170,6 +199,7 @@ export default function MaterialEntry() {
               'border-2 border-dashed rounded-xl p-8 text-center transition-all',
               dragOver ? 'border-[#F97316] bg-orange-50' :
               aiState === 'done' ? 'border-green-300 bg-green-50' :
+              aiState === 'error' ? 'border-red-300 bg-red-50' :
               'border-gray-200 hover:border-gray-300'
             )}
             onDragOver={e => { e.preventDefault(); setDragOver(true); }}
@@ -184,31 +214,46 @@ export default function MaterialEntry() {
                   <p className="text-xs text-gray-400 mt-1">正在解析数据手册，识别核心技术规格</p>
                 </div>
                 <div className="w-48 h-1.5 bg-gray-200 rounded-full overflow-hidden mt-2">
-                  <div className="h-full bg-[#F97316] rounded-full animate-pulse" style={{ width: '65%' }} />
+                  <div
+                    className="h-full bg-[#F97316] rounded-full transition-all duration-300"
+                    style={{ width: `${uploadProgress || 30}%` }}
+                  />
                 </div>
+                <p className="text-xs text-gray-400">{uploadProgress > 0 ? `上传 ${uploadProgress}%` : '处理中...'}</p>
               </div>
             ) : aiState === 'done' ? (
               <div className="flex flex-col items-center gap-2">
                 <CheckCircle size={36} className="text-green-500" />
-                <p className="text-sm font-medium text-gray-700">解析完成！已提取 {DEMO_EXTRACTED.parameters.length} 项参数</p>
-                <p className="text-xs text-gray-400">{fileName || 'STM32G431CBU6_datasheet.pdf'}</p>
+                <p className="text-sm font-medium text-gray-700">解析完成！已提取 {extractedCount} 项参数</p>
+                <p className="text-xs text-gray-400">{fileName}</p>
+              </div>
+            ) : aiState === 'error' ? (
+              <div className="flex flex-col items-center gap-3">
+                <AlertCircle size={36} className="text-red-400" />
+                <div>
+                  <p className="text-sm font-medium text-gray-700">解析失败，请手动填写</p>
+                  <p className="text-xs text-gray-400 mt-1">或重新选择文件</p>
+                </div>
+                <label className="cursor-pointer">
+                  <input type="file" className="hidden" accept=".pdf" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+                  <span className="inline-flex items-center gap-2 border border-gray-300 text-gray-600 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors">
+                    <Upload size={14} /> 重新选择
+                  </span>
+                </label>
               </div>
             ) : (
               <div className="flex flex-col items-center gap-3">
                 <Upload size={36} className="text-gray-300" />
                 <div>
                   <p className="text-sm font-medium text-gray-700">拖拽 PDF 数据手册到此处</p>
-                  <p className="text-xs text-gray-400 mt-1">支持 PDF、Word、TXT 格式</p>
+                  <p className="text-xs text-gray-400 mt-1">支持 PDF 格式，最大 50MB</p>
                 </div>
                 <label className="cursor-pointer">
                   <input
                     type="file"
                     className="hidden"
-                    accept=".pdf,.doc,.docx,.txt"
-                    onChange={e => {
-                      const f = e.target.files?.[0];
-                      if (f) { setFileName(f.name); triggerExtract(); }
-                    }}
+                    accept=".pdf"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
                   />
                   <span className="inline-flex items-center gap-2 bg-[#F97316] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-orange-600 transition-colors">
                     <Upload size={14} />
@@ -223,20 +268,8 @@ export default function MaterialEntry() {
             <div className="mt-3 flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-lg p-3">
               <Sparkles size={14} className="text-blue-500 flex-shrink-0 mt-0.5" />
               <p className="text-xs text-blue-700">
-                <strong>AI 辅助提取：</strong>上传数据手册后，AI 将自动识别电气参数、封装信息、工作条件等核心规格，
-                工程师只需对提取结果进行审核确认，大幅提升录入效率。
+                <strong>AI 辅助提取：</strong>上传数据手册后，AI 将自动识别电气参数、封装信息、工作条件等核心规格，工程师只需对提取结果进行审核确认，大幅提升录入效率。
               </p>
-            </div>
-          )}
-
-          {aiState === 'idle' && (
-            <div className="mt-3">
-              <button
-                onClick={() => { setFileName('Demo_Datasheet.pdf'); triggerExtract(); }}
-                className="text-xs text-[#F97316] hover:underline cursor-pointer flex items-center gap-1"
-              >
-                <Sparkles size={12} /> 演示：使用示例数据手册
-              </button>
             </div>
           )}
         </div>
@@ -264,7 +297,6 @@ export default function MaterialEntry() {
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              {/* Name */}
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-600 mb-1">物料名称 *</label>
                 <input
@@ -275,32 +307,29 @@ export default function MaterialEntry() {
                   placeholder="如：STM32F103C8T6 微控制器"
                 />
               </div>
-              {/* Part Number */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">内部料号</label>
                 <input
                   value={form.partNumber}
                   onChange={e => setForm(f => ({ ...f, partNumber: e.target.value }))}
                   className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-[#F97316]"
-                  placeholder="自动生成或手动填写"
+                  placeholder="留空自动生成"
                 />
               </div>
-              {/* Category */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">物料类别 *</label>
                 <select
                   required
                   value={form.category}
-                  onChange={e => setForm(f => ({ ...f, category: e.target.value as MaterialCategory }))}
+                  onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
                   className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-[#F97316] cursor-pointer"
                 >
                   <option value="">请选择类别</option>
-                  {Object.entries(categoryLabels).map(([k, v]) => (
+                  {Object.entries(CATEGORY_LABELS).map(([k, v]) => (
                     <option key={k} value={k}>{v}</option>
                   ))}
                 </select>
               </div>
-              {/* Manufacturer */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">制造商 *</label>
                 <input
@@ -311,7 +340,6 @@ export default function MaterialEntry() {
                   placeholder="如：ST、TDK、村田"
                 />
               </div>
-              {/* MPN */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">制造商型号（MPN）*</label>
                 <input
@@ -322,7 +350,6 @@ export default function MaterialEntry() {
                   placeholder="如：STM32F103C8T6"
                 />
               </div>
-              {/* Quality Level */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">质量等级</label>
                 <select
@@ -336,7 +363,6 @@ export default function MaterialEntry() {
                   <option value="D">D级 - 禁止使用</option>
                 </select>
               </div>
-              {/* Preferred Rank */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">优选排名</label>
                 <input
@@ -348,7 +374,6 @@ export default function MaterialEntry() {
                   placeholder="1 = 首选"
                 />
               </div>
-              {/* Unit Price */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">单价（元）</label>
                 <input
@@ -360,7 +385,6 @@ export default function MaterialEntry() {
                   placeholder="0.00"
                 />
               </div>
-              {/* Lead Time */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">货期（天）</label>
                 <input
@@ -371,7 +395,6 @@ export default function MaterialEntry() {
                   placeholder="14"
                 />
               </div>
-              {/* Description */}
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-600 mb-1">描述</label>
                 <textarea
@@ -382,6 +405,12 @@ export default function MaterialEntry() {
                   placeholder="物料简要描述"
                 />
               </div>
+              {datasheetUrl && (
+                <div className="col-span-2 flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg p-2.5">
+                  <CheckCircle size={14} className="text-green-500 flex-shrink-0" />
+                  <span className="text-xs text-green-700">数据手册已上传至存储服务</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -438,9 +467,14 @@ export default function MaterialEntry() {
 
           {/* Submit */}
           <div className="flex items-center justify-between bg-white rounded-xl border border-gray-200 p-4">
-            <p className="text-xs text-gray-400">
-              提交后将进入审核流程，审核通过后正式入库
-            </p>
+            <div>
+              <p className="text-xs text-gray-400">提交后将进入审核流程，审核通过后正式入库</p>
+              {submitError && (
+                <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                  <AlertCircle size={12} /> {submitError}
+                </p>
+              )}
+            </div>
             <div className="flex gap-3">
               <button
                 type="button"
@@ -451,9 +485,11 @@ export default function MaterialEntry() {
               </button>
               <button
                 type="submit"
-                className="px-6 py-2 text-sm bg-[#F97316] text-white rounded-lg hover:bg-orange-600 cursor-pointer transition-colors font-medium"
+                disabled={submitting}
+                className="px-6 py-2 text-sm bg-[#F97316] text-white rounded-lg hover:bg-orange-600 cursor-pointer transition-colors font-medium disabled:opacity-60 flex items-center gap-2"
               >
-                提交审核
+                {submitting && <Loader2 size={14} className="animate-spin" />}
+                {submitting ? '提交中...' : '提交审核'}
               </button>
             </div>
           </div>

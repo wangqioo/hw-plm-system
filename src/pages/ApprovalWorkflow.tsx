@@ -1,12 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { clsx } from 'clsx';
 import {
-  CheckCircle, XCircle, Clock, Eye, MessageSquare,
-  Filter, ChevronRight, AlertTriangle, FileCheck,
-  User, Calendar, Package
+  CheckCircle, XCircle, Eye, MessageSquare,
+  Filter, AlertTriangle, FileCheck,
+  User, Calendar, Package, Loader2
 } from 'lucide-react';
-import { approvalRecords as initial } from '../data/mockData';
-import type { ApprovalRecord } from '../types';
+import { approvalsApi } from '../api/approvals';
+import type { ApprovalRecord } from '../api/approvals';
 import { StatusBadge } from '../components/Badge';
 
 type FilterStatus = 'all' | 'pending' | 'reviewing' | 'approved' | 'rejected';
@@ -36,18 +36,32 @@ const priorityLabels: Record<string, string> = {
 };
 
 export default function ApprovalWorkflow() {
-  const [records, setRecords] = useState<ApprovalRecord[]>(initial);
+  const [records, setRecords] = useState<ApprovalRecord[]>([]);
+  const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
   const [filterType, setFilterType] = useState<FilterType>('all');
   const [selected, setSelected] = useState<ApprovalRecord | null>(null);
   const [comment, setComment] = useState('');
   const [processing, setProcessing] = useState<string | null>(null);
 
-  const filtered = records.filter(r => {
-    const matchStatus = filterStatus === 'all' || r.status === filterStatus;
-    const matchType = filterType === 'all' || r.type === filterType;
-    return matchStatus && matchType;
-  });
+  const fetchRecords = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await approvalsApi.list({
+        status: filterStatus !== 'all' ? filterStatus : undefined,
+        type: filterType !== 'all' ? filterType : undefined,
+      });
+      setRecords(res.data);
+    } catch {
+      setRecords([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [filterStatus, filterType]);
+
+  useEffect(() => {
+    fetchRecords();
+  }, [fetchRecords]);
 
   const counts = {
     pending: records.filter(r => r.status === 'pending').length,
@@ -56,32 +70,24 @@ export default function ApprovalWorkflow() {
     rejected: records.filter(r => r.status === 'rejected').length,
   };
 
-  const handleAction = (id: string, action: 'approve' | 'reject' | 'review') => {
+  const handleAction = async (id: string, action: 'approve' | 'reject' | 'review') => {
     setProcessing(id);
-    setTimeout(() => {
-      setRecords(prev => prev.map(r => {
-        if (r.id !== id) return r;
-        return {
-          ...r,
-          status: action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'reviewing',
-          reviewedBy: '李审核',
-          reviewedAt: new Date().toLocaleString('zh-CN'),
-          comment: comment || r.comment,
-        };
-      }));
-      if (selected?.id === id) {
-        setSelected(prev => prev ? {
-          ...prev,
-          status: action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'reviewing',
-          reviewedBy: '李审核',
-          reviewedAt: new Date().toLocaleString('zh-CN'),
-          comment: comment || prev.comment,
-        } : null);
-      }
-      setProcessing(null);
+    try {
+      const res = await approvalsApi.action(id, action, comment || undefined);
+      const updated = res.data;
+      setRecords(prev => prev.map(r => r.id === id ? updated : r));
+      if (selected?.id === id) setSelected(updated);
       setComment('');
-    }, 600);
+    } finally {
+      setProcessing(null);
+    }
   };
+
+  const filtered = records.filter(r => {
+    const matchStatus = filterStatus === 'all' || r.status === filterStatus;
+    const matchType = filterType === 'all' || r.type === filterType;
+    return matchStatus && matchType;
+  });
 
   return (
     <div className="flex gap-5 h-full">
@@ -134,77 +140,82 @@ export default function ApprovalWorkflow() {
 
         {/* List */}
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden flex-1">
-          <div className="overflow-auto">
-            {filtered.map(record => (
-              <div
-                key={record.id}
-                onClick={() => setSelected(record)}
-                className={clsx(
-                  'flex items-start gap-3 px-4 py-4 border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors',
-                  selected?.id === record.id && 'bg-orange-50/50'
-                )}
-              >
-                {/* Priority dot */}
-                <div className={`mt-1.5 w-2.5 h-2.5 rounded-full flex-shrink-0 ${priorityColors[record.priority]}`} title={priorityLabels[record.priority]} />
+          {loading ? (
+            <div className="flex items-center justify-center py-20">
+              <Loader2 size={24} className="animate-spin text-gray-400" />
+            </div>
+          ) : (
+            <div className="overflow-auto">
+              {filtered.map(record => (
+                <div
+                  key={record.id}
+                  onClick={() => setSelected(record)}
+                  className={clsx(
+                    'flex items-start gap-3 px-4 py-4 border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors',
+                    selected?.id === record.id && 'bg-orange-50/50'
+                  )}
+                >
+                  <div className={`mt-1.5 w-2.5 h-2.5 rounded-full flex-shrink-0 ${priorityColors[record.priority]}`} title={priorityLabels[record.priority]} />
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-medium text-gray-900">{record.materialName}</span>
-                    <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${typeColors[record.type]}`}>
-                      {typeLabels[record.type]}
-                    </span>
-                    {record.priority === 'high' && (
-                      <span className="flex items-center gap-0.5 text-[11px] text-red-600">
-                        <AlertTriangle size={11} /> 紧急
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium text-gray-900">{record.material_name}</span>
+                      <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${typeColors[record.type]}`}>
+                        {typeLabels[record.type]}
                       </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-gray-400 mt-0.5 font-mono">{record.partNumber}</div>
-                  <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400 flex-wrap">
-                    <span className="flex items-center gap-1"><User size={11} /> {record.submittedBy}</span>
-                    <span className="flex items-center gap-1"><Calendar size={11} /> {record.submittedAt}</span>
-                    {record.projectRef && (
-                      <span className="flex items-center gap-1"><Package size={11} /> {record.projectRef}</span>
-                    )}
-                  </div>
-                  {record.comment && (
-                    <div className="mt-1.5 text-xs text-gray-500 flex items-start gap-1">
-                      <MessageSquare size={11} className="flex-shrink-0 mt-0.5" />
-                      <span className="line-clamp-1">{record.comment}</span>
+                      {record.priority === 'high' && (
+                        <span className="flex items-center gap-0.5 text-[11px] text-red-600">
+                          <AlertTriangle size={11} /> 紧急
+                        </span>
+                      )}
                     </div>
-                  )}
-                </div>
+                    <div className="text-xs text-gray-400 mt-0.5 font-mono">{record.part_number}</div>
+                    <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400 flex-wrap">
+                      <span className="flex items-center gap-1"><User size={11} /> {record.submitter_name}</span>
+                      <span className="flex items-center gap-1"><Calendar size={11} /> {new Date(record.submitted_at).toLocaleDateString('zh-CN')}</span>
+                      {record.project_ref && (
+                        <span className="flex items-center gap-1"><Package size={11} /> {record.project_ref}</span>
+                      )}
+                    </div>
+                    {record.comment && (
+                      <div className="mt-1.5 text-xs text-gray-500 flex items-start gap-1">
+                        <MessageSquare size={11} className="flex-shrink-0 mt-0.5" />
+                        <span className="line-clamp-1">{record.comment}</span>
+                      </div>
+                    )}
+                  </div>
 
-                <div className="flex flex-col items-end gap-2">
-                  <StatusBadge status={record.status} />
-                  {(record.status === 'pending' || record.status === 'reviewing') && (
-                    <div className="flex gap-1.5">
-                      <button
-                        onClick={e => { e.stopPropagation(); handleAction(record.id, 'approve'); }}
-                        disabled={!!processing}
-                        className="flex items-center gap-1 text-[11px] bg-green-100 text-green-700 hover:bg-green-200 px-2 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
-                      >
-                        <CheckCircle size={11} /> 通过
-                      </button>
-                      <button
-                        onClick={e => { e.stopPropagation(); handleAction(record.id, 'reject'); }}
-                        disabled={!!processing}
-                        className="flex items-center gap-1 text-[11px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
-                      >
-                        <XCircle size={11} /> 驳回
-                      </button>
-                    </div>
-                  )}
+                  <div className="flex flex-col items-end gap-2">
+                    <StatusBadge status={record.status} />
+                    {(record.status === 'pending' || record.status === 'reviewing') && (
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={e => { e.stopPropagation(); handleAction(record.id, 'approve'); }}
+                          disabled={!!processing}
+                          className="flex items-center gap-1 text-[11px] bg-green-100 text-green-700 hover:bg-green-200 px-2 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <CheckCircle size={11} /> 通过
+                        </button>
+                        <button
+                          onClick={e => { e.stopPropagation(); handleAction(record.id, 'reject'); }}
+                          disabled={!!processing}
+                          className="flex items-center gap-1 text-[11px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <XCircle size={11} /> 驳回
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {filtered.length === 0 && (
-              <div className="py-16 text-center">
-                <FileCheck size={32} className="mx-auto text-gray-300 mb-3" />
-                <p className="text-sm text-gray-400">没有符合条件的审核记录</p>
-              </div>
-            )}
-          </div>
+              ))}
+              {filtered.length === 0 && (
+                <div className="py-16 text-center">
+                  <FileCheck size={32} className="mx-auto text-gray-300 mb-3" />
+                  <p className="text-sm text-gray-400">没有符合条件的审核记录</p>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -213,14 +224,13 @@ export default function ApprovalWorkflow() {
         <div className="w-80 flex-shrink-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
           <div className="px-4 py-4 border-b border-gray-100 flex items-start justify-between">
             <div>
-              <h3 className="font-semibold text-gray-900 text-sm">{selected.materialName}</h3>
-              <p className="text-xs text-gray-400 mt-0.5 font-mono">{selected.partNumber}</p>
+              <h3 className="font-semibold text-gray-900 text-sm">{selected.material_name}</h3>
+              <p className="text-xs text-gray-400 mt-0.5 font-mono">{selected.part_number}</p>
             </div>
             <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer text-lg">×</button>
           </div>
 
           <div className="flex-1 overflow-auto p-4 space-y-4">
-            {/* Status */}
             <div className="flex items-center gap-2 flex-wrap">
               <StatusBadge status={selected.status} />
               <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${typeColors[selected.type]}`}>
@@ -241,7 +251,7 @@ export default function ApprovalWorkflow() {
                   </div>
                   <div>
                     <div className="text-xs font-medium text-gray-700">提交申请</div>
-                    <div className="text-xs text-gray-400">{selected.submittedBy} · {selected.submittedAt}</div>
+                    <div className="text-xs text-gray-400">{selected.submitter_name} · {new Date(selected.submitted_at).toLocaleString('zh-CN')}</div>
                   </div>
                 </div>
                 {(selected.status === 'approved' || selected.status === 'rejected' || selected.status === 'reviewing') && (
@@ -259,7 +269,7 @@ export default function ApprovalWorkflow() {
                         {selected.status === 'approved' ? '审核通过' : selected.status === 'rejected' ? '已驳回' : '审核中'}
                       </div>
                       <div className="text-xs text-gray-400">
-                        {selected.reviewedBy} {selected.reviewedAt && `· ${selected.reviewedAt}`}
+                        {selected.reviewer_name} {selected.reviewed_at && `· ${new Date(selected.reviewed_at).toLocaleString('zh-CN')}`}
                       </div>
                     </div>
                   </div>
@@ -267,12 +277,11 @@ export default function ApprovalWorkflow() {
               </div>
             </div>
 
-            {/* Info */}
             <div className="space-y-2">
               <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">申请详情</h4>
               {[
                 { label: '申请类型', value: typeLabels[selected.type] },
-                { label: '关联项目', value: selected.projectRef || '-' },
+                { label: '关联项目', value: selected.project_ref || '-' },
                 { label: '优先级', value: priorityLabels[selected.priority] },
               ].map(row => (
                 <div key={row.label} className="flex justify-between text-xs">
@@ -282,7 +291,6 @@ export default function ApprovalWorkflow() {
               ))}
             </div>
 
-            {/* Comment */}
             {selected.comment && (
               <div className="bg-gray-50 rounded-lg p-3">
                 <h4 className="text-xs font-semibold text-gray-500 mb-1.5">备注说明</h4>
@@ -316,7 +324,8 @@ export default function ApprovalWorkflow() {
                   disabled={!!processing}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs bg-green-500 text-white rounded-lg hover:bg-green-600 cursor-pointer transition-colors disabled:opacity-50"
                 >
-                  <CheckCircle size={13} /> 审核通过
+                  {processing === selected.id ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
+                  审核通过
                 </button>
                 <button
                   onClick={() => handleAction(selected.id, 'reject')}
