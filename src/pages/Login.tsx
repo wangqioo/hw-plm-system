@@ -1,4 +1,5 @@
-import { useState, FormEvent } from 'react';
+import { useState } from 'react';
+import type { FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Cpu, Eye, EyeOff, LogIn, AlertCircle } from 'lucide-react';
 import { authApi } from '../api/auth';
