@@ -71,7 +71,7 @@ services:
     container_name: plm-system
     restart: unless-stopped
     ports:
-      - "8080:80"
+      - "8088:80"
     depends_on:
       plm-backend:
         condition: service_started
